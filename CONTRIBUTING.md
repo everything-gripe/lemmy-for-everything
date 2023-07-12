@@ -1,4 +1,4 @@
-﻿# Contributing to Everything
+﻿# Contributing to Lemmy for Everything
 
 Contributions are welcome! If you would like to contribute to Lemmy for Everything, please follow these guidelines:
 
@@ -8,4 +8,4 @@ Contributions are welcome! If you would like to contribute to Lemmy for Everythi
 4. Submit a pull request, explaining the purpose and details of your contribution.
 5. Ensure your code adheres to the project's coding standards and passes any tests.
 
-By contributing to Everything, you agree to license your contributions under the [ISC License](LICENSE.md).
+By contributing to Lemmy for Everything, you agree to license your contributions under the [ISC License](LICENSE.md).
