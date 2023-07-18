@@ -4,8 +4,6 @@
     Everything,
     GetGroupOptions,
     GetGroupResult,
-    GetGroupsQuery,
-    GetGroupsQueryResult,
     GetNestedCommentsOptions,
     GetNestedCommentsResult,
     GetPostOptions,
@@ -21,9 +19,27 @@
     Post,
     Group,
     User,
-    UserDetail
+    UserDetail, SearchResult, SearchOptions, SearchType, AutocompleteOptions, AutocompleteResult, Data
 } from "everything-sdk";
-import {CommentSortType, CommentView, CommunityView, LemmyHttp, PersonView, PostView, SortType} from "lemmy-js-client";
+import {
+    CommentSortType,
+    CommentView,
+    CommunityView,
+    LemmyHttp,
+    PersonView,
+    PostView,
+    SortType,
+    SearchType as LemmySearchType,
+    Community as LemmyCommunity,
+    Person as LemmyPerson,
+    Post as LemmyPost, SearchResponse
+} from "lemmy-js-client";
+
+const maxQuery = 50
+
+type SearchResponseTypes = LemmyCommunity | LemmyPerson | LemmyPost
+type SearchTypes = CommunitySearchType | UserSearchType | PostSearchType
+
 
 interface InputInfo  {
     primaryInput: string,
@@ -31,6 +47,118 @@ interface InputInfo  {
     instance: string,
     postId: string
 }
+
+type Filters = {
+    limit: number,
+    page: number
+    sort?: SortType
+    primarySort?: string
+}
+
+type CommentFilters = {
+    limit: number,
+    sort?: CommentSortType
+}
+
+type AutocompleteFilters = {
+    limit: number,
+    q: string,
+    searchType: ISearchTypeConstructor
+}
+
+type SearchFilters = {
+    limit: number,
+    page: number,
+    q: string,
+    searchType: ISearchTypeConstructor
+}
+
+interface ISearchTypeConstructor {
+    new (lemmyService: LemmyService, searchResponse: SearchResponse): SearchTypes
+    searchTypeName: LemmySearchType
+}
+
+interface ISearchType<T extends SearchResponseTypes, TData extends Data> {
+    filterResults(predicate?: (result: T) => boolean): this
+    buildResults(): Promise<Array<Everything<TData>>>
+}
+
+abstract class SearchTypeBase<T extends SearchResponseTypes, TData extends Data> implements ISearchType<T, TData> {
+    readonly lemmyService: LemmyService
+    readonly searchResponse: SearchResponse
+
+    constructor(lemmyService: LemmyService, searchResponse: SearchResponse) {
+        this.lemmyService = lemmyService
+        this.searchResponse = searchResponse
+    }
+
+    // filterResults(predicate?: (result: T) => boolean, )
+
+    abstract filterResults(predicate?: (result: T) => boolean): this;
+
+    abstract buildResults(): Promise<Array<Everything<TData>>>;
+}
+
+const CommunitySearchTypeBase = SearchTypeBase<LemmyCommunity, Group>
+const UserSearchTypeBase = SearchTypeBase<LemmyPerson, User>
+const PostSearchTypeBase = SearchTypeBase<LemmyPost, Post>
+
+
+class CommunitySearchType extends CommunitySearchTypeBase {
+    static readonly searchTypeName: LemmySearchType = "Communities"
+
+    filterResults(predicate?: (result: LemmyCommunity) => boolean): this {
+        //TODO: Consider moving much of this logic to the base
+        this.searchResponse.communities = predicate
+        ? this.searchResponse.communities.filter(communityView => predicate(communityView.community))
+        : this.searchResponse.communities
+
+        return this
+    }
+
+    async buildResults(): Promise<Array<Everything<Group>>> {
+        return this.searchResponse.communities.map(group => this.lemmyService.buildGroup(group))
+    }
+}
+
+class UserSearchType extends UserSearchTypeBase {
+    static readonly searchTypeName: LemmySearchType = "Users"
+
+    filterResults(predicate?: (result: LemmyPerson) => boolean): this {
+        this.searchResponse.users = predicate
+        ? this.searchResponse.users.filter(personView => predicate(personView.person))
+        : this.searchResponse.users
+
+        return this
+    }
+
+    async buildResults(): Promise<Array<Everything<User>>> {
+        return this.searchResponse.users.map(user => this.lemmyService.buildUser(user))
+    }
+}
+
+class PostSearchType extends PostSearchTypeBase {
+    static readonly searchTypeName: LemmySearchType = "Posts"
+
+    filterResults(predicate?: (result: LemmyPost) => boolean): this {
+        this.searchResponse.posts = predicate
+        ? this.searchResponse.posts.filter(postView => predicate(postView.post))
+        : this.searchResponse.posts
+
+        return this
+    }
+
+    async buildResults(): Promise<Array<Everything<Post>>> {
+        return await Promise.all(this.searchResponse.posts.map(post => this.lemmyService.buildPost(post)))
+    }
+}
+
+const searchTypes: {[key in SearchType]: ISearchTypeConstructor} = {
+    [SearchType.Group]: CommunitySearchType,
+    [SearchType.User]: UserSearchType,
+    [SearchType.Post]: PostSearchType
+}
+
 
 const kbin = 'kbin.social';
 
@@ -41,11 +169,12 @@ export default class LemmyService implements IService {
     client?: LemmyHttp
     inputInfo?: InputInfo
 
-    setClient(input = '', ids?: CommentIds): this is {client: LemmyHttp, inputInfo: InputInfo} {
+    setClient(input = '', {ids, group}: {ids?: CommentIds, group?: string} = {}): this is {client: LemmyHttp, inputInfo: InputInfo} {
         const [primaryInput, inputInstance] = input.split('@')
         const [postId, postInstance] = ids?.postId.split('@') || []
+        const [groupName, groupInstance] = group?.split('@') || []
 
-        const instance = (postId ? postInstance : inputInstance)
+        const instance = (postId ? postInstance : groupInstance || inputInstance)
         const instanceOrDefault = instance || this.defaultInstance
         const connectionInstance = instanceOrDefault === kbin ?  this.kbinDefaultInstance : instanceOrDefault
 
@@ -57,42 +186,96 @@ export default class LemmyService implements IService {
         return true
     }
 
-    async getGroup({subreddit}: GetGroupOptions): Promise<GetGroupResult> {
-        if(!this.setClient(subreddit)) return new Unimplemented()
+    async getGroup({group}: GetGroupOptions): Promise<GetGroupResult> {
+        if(!this.setClient(group)) return new Unimplemented()
 
         const communityResponse = await this.client.getCommunity({
             name: this.inputInfo.inputAtInstance
         })
 
-        return this.buildGroup(communityResponse.community_view, subreddit);
+        return this.buildGroup(communityResponse.community_view, group);
     }
 
-    async getGroupsQuery({limit, query}: GetGroupsQuery): Promise<GetGroupsQueryResult>{
+
+    async autocomplete({limit, query, searchType}: AutocompleteOptions): Promise<AutocompleteResult> {
         if(this.defaultInstance == kbin || !this.setClient(query)) return new Unimplemented()
 
-        const searchResponse = await this.client.search({
-            type_: "Communities",
-            listing_type: this.inputInfo.instance ? "Local" : "All",
-            sort: "TopAll",
-            q: this.inputInfo.primaryInput,
-            limit,
-        })
+        //TODO: Consider combining with similar function below
+        //TODO: Consder using type_ "All" when more than one type is available.
+        const search = async ({searchType, ...filters}: AutocompleteFilters) => {
+            const searchResponse = await this.client!.search({
+                type_: searchType!.searchTypeName,
+                listing_type: this.inputInfo!.instance ? "Local" : "All",
+                sort: "TopAll",
+                ...filters
+            })
 
-        const groups = searchResponse.communities.map(communityView => this.buildGroup(communityView))
+            return new searchType!(this, searchResponse)
+                .filterResults(result => result.name.toLowerCase().startsWith(filters.q!.toLowerCase()))
+                .buildResults()
+        }
+
+        let filters = processAutocompleteFilters(limit, this.inputInfo.primaryInput, searchType)
+        const results: Array<Everything> = []
+
+        if (!Array.isArray(filters)) {
+            filters = [filters]
+        }
+
+        for (const result of filters.map(search)) {
+            results.push(...await result);
+        }
 
         return Everything.list({
-            dist: groups.length,
-            children: groups
+            dist: results.length,
+            children: results
         })
     }
 
-    async getNestedComments({ids, limit, depth, sort, subreddit}: GetNestedCommentsOptions): Promise<GetNestedCommentsResult> {
+    async search({group, query, exact, limit, page, sort, secondarySort, searchType, searchInGroup}: SearchOptions): Promise<SearchResult> {
+        if(this.defaultInstance == kbin || !this.setClient(query, {group})) return new Unimplemented()
+
+        const search = async ({searchType, ...filters}: SearchFilters) => {
+            const searchResponse = await this.client!.search({
+                community_name: searchInGroup ? group : undefined,
+                type_: searchType!.searchTypeName,
+                // listing_type: this.inputInfo!.instance ? "Local" : "All",
+                sort: "TopAll",
+                ...filters
+            })
+
+            return new searchType!(this, searchResponse)
+                .filterResults(result => exact
+                    ? result.name.toLowerCase() === filters.q!.toLowerCase()
+                    : true)
+                .buildResults()
+        }
+
+        let filters = processSearchFilters(limit, page, sort, secondarySort, exact, this.inputInfo.primaryInput, searchType)
+
+        const results: Array<Everything> = []
+
+        if (!Array.isArray(filters)) {
+            filters = [filters]
+        }
+
+        for (const result of filters.map(search)) {
+            results.push(...await result);
+        }
+
+        return Everything.list({
+            dist: results.length,
+            children: results
+        })
+    }
+
+    async getNestedComments({ids, limit, depth, sort, group}: GetNestedCommentsOptions): Promise<GetNestedCommentsResult> {
         const filters = processCommentFilters(limit, sort);
 
-        const post = await this.getPost({id: ids.postId, subreddit})
+        const post = await this.getPost({id: ids.postId, group})
         if (post instanceof Unimplemented) return new Unimplemented()
 
-        if(!this.setClient(subreddit, ids)) return new Unimplemented()
+        if(!this.setClient(group, {ids})) return new Unimplemented()
 
         const commentsResponse = await this.client.getComments({
             post_id: Number(this.inputInfo.postId),
@@ -128,8 +311,8 @@ export default class LemmyService implements IService {
         ]
     }
 
-    async getPost({id, subreddit}: GetPostOptions): Promise<GetPostResult> {
-        if(!this.setClient(subreddit, {postId: id})) return new Unimplemented()
+    async getPost({id, group}: GetPostOptions): Promise<GetPostResult> {
+        if(!this.setClient(group, {ids: {postId: id}})) return new Unimplemented()
 
         const postResponse = await this.client.getPost({
             id: Number(this.inputInfo.postId)
@@ -138,16 +321,15 @@ export default class LemmyService implements IService {
         return await this.buildPost(postResponse.post_view)
     }
 
-    async getPosts({limit, page, sort, secondarySort, subreddit}: GetPostsOptions): Promise<GetPostsResult> {
-        const {primarySort, ...filters} = processFilters(page, sort, secondarySort);
+    async getPosts({limit, page, sort, secondarySort, group}: GetPostsOptions): Promise<GetPostsResult> {
+        const {primarySort, ...filters} = processFilters(limit, page, sort, secondarySort);
 
-        if (!this.setClient(subreddit)) return new Unimplemented()
+        if (!this.setClient(group)) return new Unimplemented()
         if (this.defaultInstance === kbin && !this.inputInfo.inputAtInstance) return new Unimplemented()
 
         const postsResponse = await this.client.getPosts({
             community_name: this.inputInfo.inputAtInstance,
             type_: "All",
-            limit,
             ...filters
         })
 
@@ -173,13 +355,12 @@ export default class LemmyService implements IService {
     }
 
     async getUserDetails({limit, page, sort, secondarySort, userDetail, username}: GetUserDetailsOptions): Promise<GetUserDetailsResult> {
-        const {primarySort, ...filters} = processFilters(page, sort, secondarySort);
+        const {primarySort, ...filters} = processFilters(limit, page, sort, secondarySort);
 
         if(!this.setClient(username)) return new Unimplemented()
 
         const personDetailsResponse = await this.client.getPersonDetails({
             username: this.inputInfo.inputAtInstance,
-            limit,
             ...filters
         })
 
@@ -429,7 +610,7 @@ export default class LemmyService implements IService {
     inputAtNonDefaultInstance = (input: string, instance: string) => instance && instance !== this.defaultInstance ? `${input}@${instance}` : input
 }
 
-function processFilters(page: string | undefined, sort: string | undefined, secondarySort: string | undefined) {
+function processFilters(limit: number, page: string | undefined, sort: string | undefined, secondarySort: string | undefined): Filters {
     const pageNumber = Number(page || 1)
 
     let primarySort
@@ -439,14 +620,15 @@ function processFilters(page: string | undefined, sort: string | undefined, seco
         sort = sortTypes.includes(sort) ? sort : sortTypes.includes(primarySort) ? primarySort : undefined
     }
     return {
+        limit,
         page: pageNumber,
         sort: sort as SortType,
         primarySort
     };
 }
 
-function processCommentFilters(limit: number, sort: string | undefined) {
-    limit = Math.min(limit, 50)
+function processCommentFilters(limit: number, sort: string | undefined): CommentFilters {
+    limit = Math.min(limit, maxQuery)
 
     if (sort) {
         sort = capitalizeFirstLetter(sort.toLowerCase())
@@ -459,11 +641,44 @@ function processCommentFilters(limit: number, sort: string | undefined) {
     };
 }
 
+
+function processSearchTypeFilters(filters: any, searchType: SearchType | Array<SearchType> | SearchType.Group | SearchType.Post | SearchType.User) {
+    const createFilter = (searchType: SearchType) => ({
+        ...filters,
+        searchType: searchTypes[searchType]
+    })
+
+    return Array.isArray(searchType)
+        ? searchType.map(createFilter)
+        : createFilter(searchType)
+}
+
+function processSearchFilters(limit: number, page: string | undefined, sort: string | undefined, secondarySort: string | undefined, exact: boolean | undefined, query: string, searchType: SearchType | Array<SearchType>): SearchFilters | Array<SearchFilters>  {
+    limit = exact ? Math.min(estimateSearchLimit(limit, query), maxQuery) : Math.min(limit, maxQuery)
+    const filters = {q: query, ...processFilters(limit, page, sort, secondarySort)}
+    return processSearchTypeFilters(filters, searchType);
+}
+
+
+
+function processAutocompleteFilters(limit: number, query: string, searchType: SearchType | Array<SearchType>): AutocompleteFilters | Array<AutocompleteFilters> {
+    limit = Math.min(estimateSearchLimit(limit, query), maxQuery)
+    const filters = {limit, q: query}
+    return processSearchTypeFilters(filters, searchType)
+}
+
+
+function estimateSearchLimit(autocompleteLimit: number, query: string, scalingFactor = 8) {
+    const maxQueryLength = 25;
+    const normalizedQueryLength = query.length / maxQueryLength;
+    const inverseNormalizedQueryLength = 1 - normalizedQueryLength;
+    return Math.max(autocompleteLimit, Math.round(autocompleteLimit * (1 + inverseNormalizedQueryLength * scalingFactor)));
+}
+
 function getParentId(commentView: CommentView): number {
     const pathSegments = commentView.comment.path.split('.')
     return Number(pathSegments[pathSegments.length - 2]);
 }
-
 
 function capitalizeFirstLetter(str: string): string {
     if (str.length === 0) {

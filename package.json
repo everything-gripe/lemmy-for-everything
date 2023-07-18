@@ -1,6 +1,6 @@
 {
   "name": "lemmy-for-everything",
-  "version": "0.0.32",
+  "version": "0.0.37",
   "description": "Connect with Lemmy instances seamlessly through the Everything middleware. Simplify integration and streamline API access with Lemmy for Everything.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -13,12 +13,12 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "everything-sdk": "^0.7.4",
+    "everything-sdk": "^0.7.10",
     "lemmy-js-client": "^0.18.1"
   },
   "devDependencies": {
-    "typescript": "^5.1.3",
-    "@types/node": "^20.4.1"
+    "@types/node": "^20.4.1",
+    "typescript": "^5.1.3"
   },
   "files": [
     "lib"
