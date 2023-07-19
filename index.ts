@@ -1,7 +1,11 @@
 ﻿import {
+    AutocompleteOptions,
+    AutocompleteResult,
     Comment,
     CommentIds,
+    Data,
     Everything,
+    EverythingData,
     GetGroupOptions,
     GetGroupResult,
     GetNestedCommentsOptions,
@@ -13,26 +17,31 @@
     GetUserDetailsOptions,
     GetUserDetailsResult,
     GetUserOptions,
-    IService, GetUserResult,
-    Unimplemented,
+    GetUserResult,
+    Group,
+    IService,
     Kind,
     Post,
-    Group,
+    SearchOptions,
+    SearchResult,
+    SearchType,
+    Unimplemented,
     User,
-    UserDetail, SearchResult, SearchOptions, SearchType, AutocompleteOptions, AutocompleteResult, Data
+    UserDetail
 } from "everything-sdk";
 import {
     CommentSortType,
     CommentView,
+    Community as LemmyCommunity,
     CommunityView,
     LemmyHttp,
-    PersonView,
-    PostView,
-    SortType,
-    SearchType as LemmySearchType,
-    Community as LemmyCommunity,
     Person as LemmyPerson,
-    Post as LemmyPost, SearchResponse
+    PersonView,
+    Post as LemmyPost,
+    PostView,
+    SearchResponse,
+    SearchType as LemmySearchType,
+    SortType
 } from "lemmy-js-client";
 
 const maxQuery = 50
@@ -80,7 +89,7 @@ interface ISearchTypeConstructor {
 
 interface ISearchType<T extends SearchResponseTypes, TData extends Data> {
     filterResults(predicate?: (result: T) => boolean): this
-    buildResults(): Promise<Array<Everything<TData>>>
+    buildResults(): Promise<Array<EverythingData<TData>>>
 }
 
 abstract class SearchTypeBase<T extends SearchResponseTypes, TData extends Data> implements ISearchType<T, TData> {
@@ -92,11 +101,9 @@ abstract class SearchTypeBase<T extends SearchResponseTypes, TData extends Data>
         this.searchResponse = searchResponse
     }
 
-    // filterResults(predicate?: (result: T) => boolean, )
-
     abstract filterResults(predicate?: (result: T) => boolean): this;
 
-    abstract buildResults(): Promise<Array<Everything<TData>>>;
+    abstract buildResults(): Promise<Array<EverythingData<TData>>>;
 }
 
 const CommunitySearchTypeBase = SearchTypeBase<LemmyCommunity, Group>
@@ -116,7 +123,7 @@ class CommunitySearchType extends CommunitySearchTypeBase {
         return this
     }
 
-    async buildResults(): Promise<Array<Everything<Group>>> {
+    async buildResults(): Promise<Array<EverythingData<Group>>> {
         return this.searchResponse.communities.map(group => this.lemmyService.buildGroup(group))
     }
 }
@@ -132,7 +139,7 @@ class UserSearchType extends UserSearchTypeBase {
         return this
     }
 
-    async buildResults(): Promise<Array<Everything<User>>> {
+    async buildResults(): Promise<Array<EverythingData<User>>> {
         return this.searchResponse.users.map(user => this.lemmyService.buildUser(user))
     }
 }
@@ -148,7 +155,7 @@ class PostSearchType extends PostSearchTypeBase {
         return this
     }
 
-    async buildResults(): Promise<Array<Everything<Post>>> {
+    async buildResults(): Promise<Array<EverythingData<Post>>> {
         return await Promise.all(this.searchResponse.posts.map(post => this.lemmyService.buildPost(post)))
     }
 }
@@ -216,7 +223,7 @@ export default class LemmyService implements IService {
         }
 
         let filters = processAutocompleteFilters(limit, this.inputInfo.primaryInput, searchType)
-        const results: Array<Everything> = []
+        const results: Array<EverythingData> = []
 
         if (!Array.isArray(filters)) {
             filters = [filters]
@@ -253,7 +260,7 @@ export default class LemmyService implements IService {
 
         let filters = processSearchFilters(limit, page, sort, secondarySort, exact, this.inputInfo.primaryInput, searchType)
 
-        const results: Array<Everything> = []
+        const results: Array<EverythingData> = []
 
         if (!Array.isArray(filters)) {
             filters = [filters]
@@ -386,17 +393,17 @@ export default class LemmyService implements IService {
                 const details = [...await Promise.all(posts.map(this.buildPost)), ...comments.map(this.buildComment)]
                 switch (primarySort || 'New') {
                     case 'New':
-                        details.sort((left, right) => right.data.created_utc! - left.data.created_utc!)
+                        details.sort((left, right) => right.data.created_utc - left.data.created_utc)
                         break
                     case 'Old':
-                        details.sort((left, right) => left.data.created_utc! - right.data.created_utc!)
+                        details.sort((left, right) => left.data.created_utc - right.data.created_utc)
                         break
                     case 'Top':
-                        details.sort((left, right) => right.data.score! - left.data.score!)
+                        details.sort((left, right) => right.data.score - left.data.score)
                         break
                     case 'Hot':
                         // @ts-ignore
-                        details.sort((left, right) => right.data.hot_rank! - left.data.hot_rank)
+                        details.sort((left, right) => right.data.hot_rank - left.data.hot_rank)
                         break
                 }
 
@@ -412,7 +419,7 @@ export default class LemmyService implements IService {
     }
 
 
-    buildPost = async (postView: PostView): Promise<Everything<Post>> => {
+    buildPost = async (postView: PostView): Promise<EverythingData<Post>> => {
         const id= this.inputAtNonDefaultInstance(postView.post.id.toString(), this.inputInfo!.instance)
         const title = postView.post.name;
         const postSubreddit = this.inputAtNonDefaultInstance(postView.community.name, new URL(postView.community.actor_id).host)
@@ -434,8 +441,7 @@ export default class LemmyService implements IService {
 
         const hotRank = postView.counts.hot_rank
 
-
-        const post = Everything.post({
+        return await Everything.post({
             id: id,
             title: title || '',
             name: name,
@@ -453,7 +459,6 @@ export default class LemmyService implements IService {
             created_utc: createdUtc,
             is_self: isSelf,
             selftext: selftext || '',
-            selftext_html: selftext || '',
             pinned: pinned,
             stickied: pinned,
             domain: domain,
@@ -461,11 +466,11 @@ export default class LemmyService implements IService {
             // @ts-ignore
             hot_rank: hotRank
         })
-        await post.data.buildMetadata()
-        return post
+            .buildHtmlFromMarkdown()
+            .buildMetadata()
     };
 
-    buildComment = (commentView: CommentView): Everything<Comment> => {
+    buildComment = (commentView: CommentView): EverythingData<Comment> => {
         const id = commentView.comment.id.toString()
         const parentId = getParentId(commentView)
         const postId = this.inputAtNonDefaultInstance(commentView.post.id.toString(), this.inputInfo!.instance)
@@ -501,7 +506,6 @@ export default class LemmyService implements IService {
             created_utc: createdUtc,
             created: createdUtc,
             body: body,
-            body_html: body,
             // count: count || undefined,
             depth: depth,
             permalink: permalink,
@@ -510,9 +514,10 @@ export default class LemmyService implements IService {
             // @ts-ignore
             hot_rank: hotRank
         })
+            .buildHtmlFromMarkdown()
     };
 
-    buildGroup = (communityView: CommunityView, subreddit?: string): Everything<Group> => {
+    buildGroup = (communityView: CommunityView, subreddit?: string): EverythingData<Group> => {
         const createdUtc = Math.floor(new Date(communityView.counts.published).getTime() / 1000);
         const displayName = subreddit || this.inputAtNonDefaultInstance(communityView.community.name, new URL(communityView.community.actor_id).host)
 
@@ -533,14 +538,15 @@ export default class LemmyService implements IService {
             banner_background_image: communityView.community.banner,
             mobile_banner_image: communityView.community.banner,
             description: communityView.community.description,
-            description_html: communityView.community.description,
+            // description_html: communityView.community.description,
             public_description: communityView.community.description,
-            public_description_html: communityView.community.description,
+            // public_description_html: communityView.community.description,
             over18: communityView.community.nsfw,
         })
+            .buildHtmlFromMarkdown()
     };
 
-    buildUser = (personView: PersonView): Everything<User> => {
+    buildUser = (personView: PersonView): EverythingData<User> => {
         const createdUtc = Math.floor(new Date(personView.person.published).getTime() / 1000);
         const displayName = this.inputAtNonDefaultInstance(personView.person.name, new URL(personView.person.actor_id).host)
         return Everything.user({
@@ -567,9 +573,9 @@ export default class LemmyService implements IService {
         })
     };
 
-    nestComments = (ids: CommentIds, flatComments: CommentView[]): Array<Everything<Comment>> => {
+    nestComments = (ids: CommentIds, flatComments: CommentView[]): Array<EverythingData<Comment>> => {
         let rootId
-        const comments: {[key: string]: Array<{commentView: CommentView, everythingComment: Everything<Comment>}>} = {}
+        const comments: {[key: string]: Array<{commentView: CommentView, everythingComment: EverythingData<Comment>}>} = {}
 
         for (const commentView of flatComments) {
             const parentId = getParentId(commentView);
