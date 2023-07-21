@@ -25,6 +25,7 @@
     SearchOptions,
     SearchResult,
     SearchType,
+    ServiceOptions,
     Unimplemented,
     User,
     UserDetail
@@ -170,24 +171,33 @@ const searchTypes: {[key in SearchType]: ISearchTypeConstructor} = {
 const kbin = 'kbin.social';
 
 export default class LemmyService implements IService {
+    readonly searchInstance = 'lemdro.id'
+    readonly serviceDomain = process.env.LEMMY_SERVICE_DOMAIN
     readonly defaultInstance = process.env.LEMMY_DEFAULT_INSTANCE!
     readonly kbinDefaultInstance = process.env.LEMMY_DEFAULT_INSTANCE!
+
+    options?: ServiceOptions
 
     client?: LemmyHttp
     inputInfo?: InputInfo
 
-    setClient(input = '', {ids, group}: {ids?: CommentIds, group?: string} = {}): this is {client: LemmyHttp, inputInfo: InputInfo} {
+    init(options?: ServiceOptions): typeof this {
+        this.options = options
+        return this
+    }
+
+    setClient(input = '', {ids, group, search}: {ids?: CommentIds, group?: string, search?: boolean} = {}): this is {client: LemmyHttp, inputInfo: InputInfo} {
         const [primaryInput, inputInstance] = input.split('@')
         const [postId, postInstance] = ids?.postId.split('@') || []
         const [groupName, groupInstance] = group?.split('@') || []
 
         const instance = (postId ? postInstance : groupInstance || inputInstance)
         const instanceOrDefault = instance || this.defaultInstance
-        const connectionInstance = instanceOrDefault === kbin ?  this.kbinDefaultInstance : instanceOrDefault
+        const connectionInstance = instanceOrDefault === kbin ? this.kbinDefaultInstance : search ? this.searchInstance : instanceOrDefault
 
         const inputAtInstance = primaryInput ? `${primaryInput}@${instanceOrDefault}` : undefined
 
-        this.client = new LemmyHttp(`https://${connectionInstance}`)
+        this.client = new LemmyHttp(`https://${connectionInstance.toLowerCase()}`, {headers: this.options?.headers})
         this.inputInfo = {primaryInput, inputAtInstance, instance, postId}
 
         return true
@@ -197,18 +207,18 @@ export default class LemmyService implements IService {
         if(!this.setClient(group)) return new Unimplemented()
 
         const communityResponse = await this.client.getCommunity({
-            name: this.inputInfo.inputAtInstance
+            name: this.inputInfo.inputAtInstance?.toLowerCase()
         })
 
         return this.buildGroup(communityResponse.community_view, group);
     }
 
 
-    async autocomplete({limit, query, searchType}: AutocompleteOptions): Promise<AutocompleteResult> {
-        if(this.defaultInstance == kbin || !this.setClient(query)) return new Unimplemented()
+    async autocomplete({query, limit, exact, searchType}: AutocompleteOptions): Promise<AutocompleteResult> {
+        if(this.defaultInstance == kbin || !this.setClient(query, {search: true})) return new Unimplemented()
 
         //TODO: Consider combining with similar function below
-        //TODO: Consder using type_ "All" when more than one type is available.
+        //TODO: Consider using type_ "All" when more than one type is available.
         const search = async ({searchType, ...filters}: AutocompleteFilters) => {
             const searchResponse = await this.client!.search({
                 type_: searchType!.searchTypeName,
@@ -218,11 +228,13 @@ export default class LemmyService implements IService {
             })
 
             return new searchType!(this, searchResponse)
-                .filterResults(result => result.name.toLowerCase().startsWith(filters.q!.toLowerCase()))
+                .filterResults(result => exact
+                    ? result.name.toLowerCase() === filters.q!.toLowerCase()
+                    : result.name.toLowerCase().startsWith(filters.q!.toLowerCase()))
                 .buildResults()
         }
 
-        let filters = processAutocompleteFilters(limit, this.inputInfo.primaryInput, searchType)
+        let filters = processAutocompleteFilters(limit, this.inputInfo.primaryInput, exact, searchType)
         const results: Array<EverythingData> = []
 
         if (!Array.isArray(filters)) {
@@ -239,12 +251,12 @@ export default class LemmyService implements IService {
         })
     }
 
-    async search({group, query, exact, limit, page, sort, secondarySort, searchType, searchInGroup}: SearchOptions): Promise<SearchResult> {
-        if(this.defaultInstance == kbin || !this.setClient(query, {group})) return new Unimplemented()
+    async search({group, query, limit, page, sort, secondarySort, searchType, searchInGroup}: SearchOptions): Promise<SearchResult> {
+        if(this.defaultInstance == kbin || !this.setClient(query, {group, search: true})) return new Unimplemented()
 
         const search = async ({searchType, ...filters}: SearchFilters) => {
             const searchResponse = await this.client!.search({
-                community_name: searchInGroup ? group : undefined,
+                community_name: searchInGroup ? group?.toLowerCase() : undefined,
                 type_: searchType!.searchTypeName,
                 // listing_type: this.inputInfo!.instance ? "Local" : "All",
                 sort: "TopAll",
@@ -252,13 +264,10 @@ export default class LemmyService implements IService {
             })
 
             return new searchType!(this, searchResponse)
-                .filterResults(result => exact
-                    ? result.name.toLowerCase() === filters.q!.toLowerCase()
-                    : true)
                 .buildResults()
         }
 
-        let filters = processSearchFilters(limit, page, sort, secondarySort, exact, this.inputInfo.primaryInput, searchType)
+        let filters = processSearchFilters(limit, page, sort, secondarySort, this.inputInfo.primaryInput, searchType)
 
         const results: Array<EverythingData> = []
 
@@ -335,7 +344,7 @@ export default class LemmyService implements IService {
         if (this.defaultInstance === kbin && !this.inputInfo.inputAtInstance) return new Unimplemented()
 
         const postsResponse = await this.client.getPosts({
-            community_name: this.inputInfo.inputAtInstance,
+            community_name: this.inputInfo.inputAtInstance?.toLowerCase(),
             type_: "All",
             ...filters
         })
@@ -354,7 +363,7 @@ export default class LemmyService implements IService {
         if(!this.setClient(username)) return new Unimplemented()
 
         const personDetailsResponse = await this.client.getPersonDetails({
-            username: this.inputInfo.inputAtInstance,
+            username: this.inputInfo.inputAtInstance?.toLowerCase(),
             limit: 0
         })
 
@@ -367,7 +376,7 @@ export default class LemmyService implements IService {
         if(!this.setClient(username)) return new Unimplemented()
 
         const personDetailsResponse = await this.client.getPersonDetails({
-            username: this.inputInfo.inputAtInstance,
+            username: this.inputInfo.inputAtInstance?.toLowerCase(),
             ...filters
         })
 
@@ -434,7 +443,7 @@ export default class LemmyService implements IService {
         const createdUtc = Math.floor(new Date(postView.post.published).getTime() / 1000)
         const name = `${Kind.Post}_${id}`
         const pinned = postView.post.featured_local || postView.post.featured_community
-        const url = postView.post.url || `https://lemmy.z.gripe${permalink}`
+        const url = postView.post.url || `https://${this.serviceDomain}${permalink}`
         const domain = postView.post.url ? new URL(url).hostname : `self.${postSubreddit}`
         const selftext = postView.post.body
         const isSelf = !!selftext
@@ -467,7 +476,7 @@ export default class LemmyService implements IService {
             hot_rank: hotRank
         })
             .buildHtmlFromMarkdown()
-            .buildMetadata()
+            .buildMetadata(this.options)
     };
 
     buildComment = (commentView: CommentView): EverythingData<Comment> => {
@@ -617,6 +626,7 @@ export default class LemmyService implements IService {
 }
 
 function processFilters(limit: number, page: string | undefined, sort: string | undefined, secondarySort: string | undefined): Filters {
+    limit = Math.min(limit, maxQuery)
     const pageNumber = Number(page || 1)
 
     let primarySort
@@ -659,20 +669,17 @@ function processSearchTypeFilters(filters: any, searchType: SearchType | Array<S
         : createFilter(searchType)
 }
 
-function processSearchFilters(limit: number, page: string | undefined, sort: string | undefined, secondarySort: string | undefined, exact: boolean | undefined, query: string, searchType: SearchType | Array<SearchType>): SearchFilters | Array<SearchFilters>  {
-    limit = exact ? Math.min(estimateSearchLimit(limit, query), maxQuery) : Math.min(limit, maxQuery)
+function processSearchFilters(limit: number, page: string | undefined, sort: string | undefined, secondarySort: string | undefined, query: string, searchType: SearchType | Array<SearchType>): SearchFilters | Array<SearchFilters>  {
+    limit = Math.min(estimateSearchLimit(limit, query), maxQuery)
     const filters = {q: query, ...processFilters(limit, page, sort, secondarySort)}
     return processSearchTypeFilters(filters, searchType);
 }
 
-
-
-function processAutocompleteFilters(limit: number, query: string, searchType: SearchType | Array<SearchType>): AutocompleteFilters | Array<AutocompleteFilters> {
-    limit = Math.min(estimateSearchLimit(limit, query), maxQuery)
+function processAutocompleteFilters(limit: number, query: string, exact: boolean | undefined, searchType: SearchType | Array<SearchType>): AutocompleteFilters | Array<AutocompleteFilters> {
+    limit = exact ? Math.min(estimateSearchLimit(limit, query), maxQuery) : Math.min(limit, maxQuery)
     const filters = {limit, q: query}
     return processSearchTypeFilters(filters, searchType)
 }
-
 
 function estimateSearchLimit(autocompleteLimit: number, query: string, scalingFactor = 8) {
     const maxQueryLength = 25;
